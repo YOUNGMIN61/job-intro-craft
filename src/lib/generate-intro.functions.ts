@@ -12,6 +12,15 @@ const GenerateInput = z.object({
   keywords: z.array(z.string().max(50)).max(15).default([]),
   sections: z.array(z.enum(["growth", "strengths", "motivation", "aspiration"])).min(1),
 });
+const ApplicationMessageInput = z.object({
+  name: z.string().trim().min(1).max(30),
+  age: z.coerce.number().int().min(15).max(100),
+  region: z.string().trim().min(1).max(50),
+  jobTitle: z.string().max(300),
+  company: z.string().max(200).default(""),
+  description: z.string().max(6000).default(""),
+  keywords: z.array(z.string().max(50)).max(15).default([]),
+});
 
 const ALLOWED_DOMAINS = ["albamon.com", "jobkorea.co.kr"];
 
@@ -194,4 +203,26 @@ export const generateCoverLetter = createServerFn({ method: "POST" })
     const gateway = createLovableAiGatewayProvider(key);
     const { text } = await generateText({ model: gateway("google/gemini-2.5-flash"), prompt });
     return { text };
+  });
+
+export const generateApplicationMessage = createServerFn({ method: "POST" })
+  .validator((input: unknown) => ApplicationMessageInput.parse(input))
+  .handler(async ({ data }) => {
+    const key = process.env.LOVABLE_API_KEY;
+    if (!key) throw new Error("AI 생성용 LOVABLE_API_KEY가 설정되지 않았습니다.");
+    const gateway = createLovableAiGatewayProvider(key);
+    const prompt = `아래 공고에 온라인 지원할 때 인사담당자에게 보낼 전달 메시지를 한국어로 작성해 주세요.
+
+지원자: ${data.name}, ${data.age}세, ${data.region} 거주
+공고명: ${data.jobTitle}
+업체명: ${data.company}
+공고 내용: ${data.description}
+핵심 키워드: ${data.keywords.join(", ")}
+
+공백 포함 350자 이내로 작성하세요. 자연스러운 인사로 시작하고 공고의 업무나 조건을 구체적으로 언급하세요. 이름, 나이, 거주 지역은 자연스럽게 포함하되, 경력·성격·근무 가능 시간처럼 제공되지 않은 사실은 만들지 마세요. 정중하고 적극적인 말투를 사용하고 실제 붙여넣을 본문만 출력하세요.`;
+    const { text } = await generateText({
+      model: gateway("google/gemini-2.5-flash"),
+      prompt,
+    });
+    return { text: text.trim().slice(0, 1000) };
   });

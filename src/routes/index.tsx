@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { Check, Clipboard, ExternalLink, Loader2, MapPin, Send, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
-import { analyzeJobPosting } from "@/lib/generate-intro.functions";
+import { analyzeJobPosting, generateApplicationMessage } from "@/lib/generate-intro.functions";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -22,6 +22,8 @@ type Job = {
   company: string;
   location: string;
   sourceUrl: string;
+  description: string;
+  keywords: string[];
   warning?: string;
 };
 
@@ -36,10 +38,12 @@ const EMPTY_FORM: FormData = { name: "", age: "", region: "", message: "" };
 
 function SimpleApplication() {
   const analyzeOnServer = useServerFn(analyzeJobPosting);
+  const generateMessage = useServerFn(generateApplicationMessage);
   const [url, setUrl] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [form, setForm] = useState<FormData>(EMPTY_FORM);
   const [analyzing, setAnalyzing] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
@@ -103,9 +107,39 @@ function SimpleApplication() {
       .trim();
   };
 
-  const isComplete = Boolean(
-    form.name.trim() && form.age && form.region.trim() && form.message.trim(),
-  );
+  const hasProfile = Boolean(form.name.trim() && form.age && form.region.trim());
+  const isComplete = Boolean(hasProfile && form.message.trim());
+
+  const createMessage = async () => {
+    if (!job) {
+      showNotice("먼저 공고 URL을 분석해 주세요.");
+      return;
+    }
+    if (!hasProfile) {
+      showNotice("이름, 나이, 사는 지역을 모두 입력해 주세요.");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const result = await generateMessage({
+        data: {
+          name: form.name,
+          age: Number(form.age),
+          region: form.region,
+          jobTitle: job.title,
+          company: job.company,
+          description: job.description,
+          keywords: job.keywords,
+        },
+      });
+      update("message", result.text);
+      showNotice("공고에 맞춘 지원 메시지를 작성했습니다.");
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "지원 메시지를 작성하지 못했습니다.");
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   const copyApplication = async () => {
     if (!isComplete) return;
@@ -145,13 +179,13 @@ function SimpleApplication() {
             지원 내용만 빠르게 작성하세요
           </h1>
           <p className="mt-3 text-sm leading-6 text-slate-500">
-            공고를 확인하고 기본 정보와 담당자에게 전달할 메시지를 입력하면 됩니다.
+            공고 URL과 기본 정보만 입력하면 AI가 담당자에게 보낼 메시지를 작성합니다.
           </p>
         </header>
 
         <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
           <label htmlFor="job-url" className="text-sm font-semibold">
-            공고 URL <span className="font-normal text-slate-400">(선택)</span>
+            공고 URL <span className="text-orange-500">*</span>
           </label>
           <div className="mt-3 flex flex-col gap-2 sm:flex-row">
             <input
@@ -253,12 +287,29 @@ function SimpleApplication() {
           </div>
 
           <div className="mt-7 border-t border-slate-100 pt-7">
-            <label htmlFor="message" className="text-sm font-semibold">
-              전달 메시지 <span className="text-orange-500">*</span>
-            </label>
-            <p className="mt-1 text-xs text-slate-500">
-              지원 시 인사말이나 포부 등 인사담당자에게 전달할 메시지를 입력해 주세요.
-            </p>
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <label htmlFor="message" className="text-sm font-semibold">
+                  AI가 작성한 전달 메시지
+                </label>
+                <p className="mt-1 text-xs text-slate-500">
+                  공고와 기본 정보를 바탕으로 작성되며, 생성 후 직접 수정할 수 있습니다.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={createMessage}
+                disabled={!job || !hasProfile || generating}
+                className="btn-primary"
+              >
+                {generating ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+                {form.message ? "다시 작성" : "지원 메시지 자동 작성"}
+              </button>
+            </div>
             <div className="relative mt-3">
               <textarea
                 id="message"
@@ -266,7 +317,7 @@ function SimpleApplication() {
                 onChange={(event) => update("message", event.target.value.slice(0, 1000))}
                 maxLength={1000}
                 rows={7}
-                placeholder="안녕하세요. 공고를 보고 지원합니다. 근무 가능한 시간과 간단한 소개를 적어 주세요."
+                placeholder="공고를 확인하고 이름, 나이, 사는 지역을 입력하면 AI가 자동으로 작성합니다."
                 className="w-full resize-y rounded-xl border border-slate-800 px-5 py-4 pb-9 text-sm leading-6 outline-none transition placeholder:text-slate-400 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
               />
               <span className="absolute bottom-3 right-4 text-xs">
