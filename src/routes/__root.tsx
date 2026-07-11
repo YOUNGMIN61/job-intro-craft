@@ -77,14 +77,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
+      { title: "알바 자기소개서 자동 작성" },
+      { name: "description", content: "알바몬 공고 URL을 입력하면 맞춤형 자기소개서를 자동으로 작성해드려요." },
       { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { property: "og:title", content: "알바 자기소개서 자동 작성" },
+      { property: "og:description", content: "알바몬 공고 URL을 입력하면 맞춤형 자기소개서를 자동으로 작성해드려요." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:title", content: "알바 자기소개서 자동 작성" },
+      { name: "twitter:description", content: "알바몬 공고 URL을 입력하면 맞춤형 자기소개서를 자동으로 작성해드려요." },
+      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/9882658e-66d4-498b-bb7d-648f95adf233/id-preview-d2aac322--487497db-b055-4cfb-b78a-cbe465c7f7ef.lovable.app-1783739135123.png" },
+      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/9882658e-66d4-498b-bb7d-648f95adf233/id-preview-d2aac322--487497db-b055-4cfb-b78a-cbe465c7f7ef.lovable.app-1783739135123.png" },
     ],
     links: [
       {
