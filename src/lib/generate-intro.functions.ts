@@ -121,6 +121,18 @@ function firstString(values: unknown[]) {
   );
 }
 
+function postalAddress(structured: Record<string, unknown>[]) {
+  for (const item of structured) {
+    const location = item.jobLocation;
+    if (!location || typeof location !== "object") continue;
+    const address = (location as Record<string, unknown>).address;
+    if (!address || typeof address !== "object") continue;
+    const value = (address as Record<string, unknown>).streetAddress;
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
 function fallbackJob(target: URL, reason: string) {
   const isAlbamon = target.hostname.toLowerCase().includes("albamon");
   const site = isAlbamon ? "알바몬" : "잡코리아";
@@ -226,13 +238,15 @@ export const analyzeJobPosting = createServerFn({ method: "POST" })
       cleanText(html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || ""),
       cleanText(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || ""),
     ]).replace(/\s*[|｜-]\s*(알바몬|잡코리아).*$/i, "");
-    const description = firstString([
+    const pageText = cleanText(html);
+    const descriptionParts = [
       ...structured.map((item) => item.description),
       meta(html, "og:description"),
       meta(html, "twitter:description"),
       meta(html, "description"),
-      cleanText(html).slice(0, 2500),
-    ]);
+      pageText,
+    ].filter((value): value is string => typeof value === "string" && value.trim() !== "");
+    const description = [...new Set(descriptionParts)].join("\n").slice(0, 6000);
     if (!title) return fallbackJob(target, "공고 상세 내용을 읽을 수 없어 기본 정보로 계속합니다.");
     const hiringOrganization = structured.find(
       (item) => item.hiringOrganization,
@@ -257,17 +271,18 @@ export const analyzeJobPosting = createServerFn({ method: "POST" })
       "공고",
     ]);
     const keywords = [...new Set(words.filter((w) => !stop.has(w)).slice(0, 8))];
+    const location = postalAddress(structured) || "공고 원문에서 확인";
     const details = await structureJobDetails({
       title,
       company,
-      location: "공고 원문에서 확인",
+      location,
       description,
       keywords,
     });
     return {
       title: title.slice(0, 300),
       company: company.slice(0, 200),
-      location: "공고 원문에서 확인",
+      location,
       description,
       keywords,
       ...details,
