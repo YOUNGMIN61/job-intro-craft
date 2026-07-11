@@ -21,6 +21,37 @@ const ApplicationMessageInput = z.object({
   description: z.string().max(6000).default(""),
   keywords: z.array(z.string().max(50)).max(15).default([]),
 });
+const JobDetailsInput = z.object({
+  company: z.string().max(300),
+  role: z.string().max(500),
+  duties: z.string().max(3000),
+  qualifications: z.string().max(3000),
+  preferred: z.string().max(3000),
+  conditions: z.string().max(3000),
+  keywords: z.string().max(1000),
+  competencies: z.string().max(2000),
+});
+const ApplicantInput = z.object({
+  hasExperience: z.enum(["있음", "없음", "미입력"]),
+  previousField: z.string().max(1000),
+  previousDuties: z.string().max(2000),
+  customerService: z.string().max(2000),
+  strengths: z.string().max(2000),
+  motivation: z.string().max(2000),
+  availablePeriod: z.string().max(1000),
+  highlightExperience: z.string().max(2000),
+  additionalRequest: z.string().max(2000),
+});
+const VersionsInput = z.object({
+  job: JobDetailsInput,
+  applicant: ApplicantInput,
+  tone: z.enum(["친근하게", "성실하게", "적극적으로", "간결하게"]),
+  length: z.enum([200, 300, 500]),
+});
+const RevisionInput = VersionsInput.extend({
+  original: z.string().min(1).max(3000),
+  request: z.string().min(1).max(1000),
+});
 
 const ALLOWED_DOMAINS = ["albamon.com", "jobkorea.co.kr"];
 
@@ -104,9 +135,60 @@ function fallbackJob(target: URL, reason: string) {
     description:
       "공고 사이트의 자동 접근 제한으로 상세 내용을 가져오지 못했습니다. 원문을 확인한 뒤 지원 분야와 작성 항목을 선택해 주세요.",
     keywords: [site, "채용", "지원"],
+    role: id ? `${site} 공고 #${id}` : "공고 원문에서 확인",
+    duties: "공고 원문을 확인한 뒤 주요 업무를 입력해 주세요.",
+    qualifications: "공고 원문을 확인한 뒤 지원 자격을 입력해 주세요.",
+    preferred: "공고 원문을 확인한 뒤 우대사항을 입력해 주세요.",
+    conditions: "공고 원문을 확인한 뒤 근무 조건을 입력해 주세요.",
+    competencies: "업무에 필요한 역량을 입력해 주세요.",
     sourceUrl: target.toString(),
     warning: reason,
   };
+}
+
+function extractJson(text: string) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+  const raw = fenced || text.match(/\{[\s\S]*\}/)?.[0] || "";
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+async function structureJobDetails(base: {
+  title: string;
+  company: string;
+  location: string;
+  description: string;
+  keywords: string[];
+}) {
+  const fallback = {
+    role: base.title,
+    duties: base.description.slice(0, 1200) || "공고 원문에서 확인",
+    qualifications: "공고 원문에서 확인",
+    preferred: "공고 원문에서 확인",
+    conditions: base.location || "공고 원문에서 확인",
+    competencies: base.keywords.join(", ") || "공고 원문에서 확인",
+  };
+  const key = process.env.LOVABLE_API_KEY;
+  if (!key) return fallback;
+  try {
+    const gateway = createLovableAiGatewayProvider(key);
+    const { text } = await generateText({
+      model: gateway("google/gemini-2.5-flash"),
+      prompt: `다음 아르바이트 공고 내용만 근거로 정보를 구조화하세요. 없는 내용은 반드시 "공고에 명시되지 않음"으로 쓰세요. 추측하지 마세요. JSON 외에는 출력하지 마세요.\n\n공고명: ${base.title}\n업체명: ${base.company}\n공고 내용: ${base.description}\n\nJSON 형식: {"role":"모집 직무","duties":"주요 업무","qualifications":"지원 자격","preferred":"우대사항","conditions":"근무 조건","competencies":"필요 역량"}`,
+    });
+    const parsed = extractJson(text);
+    return {
+      role: typeof parsed.role === "string" ? parsed.role : fallback.role,
+      duties: typeof parsed.duties === "string" ? parsed.duties : fallback.duties,
+      qualifications:
+        typeof parsed.qualifications === "string" ? parsed.qualifications : fallback.qualifications,
+      preferred: typeof parsed.preferred === "string" ? parsed.preferred : fallback.preferred,
+      conditions: typeof parsed.conditions === "string" ? parsed.conditions : fallback.conditions,
+      competencies:
+        typeof parsed.competencies === "string" ? parsed.competencies : fallback.competencies,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 export const analyzeJobPosting = createServerFn({ method: "POST" })
@@ -175,12 +257,20 @@ export const analyzeJobPosting = createServerFn({ method: "POST" })
       "공고",
     ]);
     const keywords = [...new Set(words.filter((w) => !stop.has(w)).slice(0, 8))];
+    const details = await structureJobDetails({
+      title,
+      company,
+      location: "공고 원문에서 확인",
+      description,
+      keywords,
+    });
     return {
       title: title.slice(0, 300),
       company: company.slice(0, 200),
       location: "공고 원문에서 확인",
       description,
       keywords,
+      ...details,
       sourceUrl: target.toString(),
       warning: "",
     };
@@ -225,4 +315,61 @@ export const generateApplicationMessage = createServerFn({ method: "POST" })
       prompt,
     });
     return { text: text.trim().slice(0, 1000) };
+  });
+
+export const generateCoverLetterVersions = createServerFn({ method: "POST" })
+  .validator((input: unknown) => VersionsInput.parse(input))
+  .handler(async ({ data }) => {
+    const key = process.env.LOVABLE_API_KEY;
+    if (!key) throw new Error("AI 생성용 LOVABLE_API_KEY가 설정되지 않았습니다.");
+    const gateway = createLovableAiGatewayProvider(key);
+    const { text } = await generateText({
+      model: gateway("google/gemini-2.5-flash"),
+      prompt: `알바몬 제출용 자기소개서 3개를 자연스러운 한국어로 작성하세요.
+
+채용공고 정보: ${JSON.stringify(data.job)}
+지원자가 직접 입력한 정보: ${JSON.stringify(data.applicant)}
+문체: ${data.tone}
+목표 글자 수: 각 버전 약 ${data.length}자
+
+절대 규칙:
+- 채용공고와 지원자가 직접 입력한 사실만 사용하세요.
+- 비어 있거나 "미입력"인 내용은 언급하지 마세요.
+- 입력하지 않은 알바 경험, 경력, 자격증, 성과, 성격, 근무 가능 시간을 절대 만들어내지 마세요.
+- 뻔한 취업 문구, 과장, 회사에 대한 근거 없는 칭찬을 피하세요.
+- 실제 아르바이트 지원자가 쓴 것처럼 구체적이고 자연스럽게 쓰세요.
+- JSON 외에는 출력하지 마세요.
+
+JSON 형식: {"experience":"경험 강조형","motivation":"지원동기 강조형","concise":"간결한 알바몬 제출형"}`,
+    });
+    const parsed = extractJson(text);
+    const result = {
+      experience: String(parsed.experience || "").trim(),
+      motivation: String(parsed.motivation || "").trim(),
+      concise: String(parsed.concise || "").trim(),
+    };
+    if (!result.experience || !result.motivation || !result.concise)
+      throw new Error("자기소개서 결과 형식을 확인하지 못했습니다. 다시 생성해 주세요.");
+    return result;
+  });
+
+export const reviseCoverLetter = createServerFn({ method: "POST" })
+  .validator((input: unknown) => RevisionInput.parse(input))
+  .handler(async ({ data }) => {
+    const key = process.env.LOVABLE_API_KEY;
+    if (!key) throw new Error("AI 생성용 LOVABLE_API_KEY가 설정되지 않았습니다.");
+    const gateway = createLovableAiGatewayProvider(key);
+    const { text } = await generateText({
+      model: gateway("google/gemini-2.5-flash"),
+      prompt: `기존 알바 자기소개서의 전체 구조와 사실은 최대한 유지하고, 사용자의 수정 요청과 직접 관련된 부분만 고치세요.
+
+기존 글: ${data.original}
+수정 요청: ${data.request}
+채용공고 정보: ${JSON.stringify(data.job)}
+지원자가 직접 입력한 정보: ${JSON.stringify(data.applicant)}
+문체: ${data.tone}, 목표 길이: 약 ${data.length}자
+
+입력하지 않은 경험, 경력, 자격증, 성과를 추가하지 마세요. 수정된 본문만 출력하세요.`,
+    });
+    return { text: text.trim() };
   });

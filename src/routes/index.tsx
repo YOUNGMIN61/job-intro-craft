@@ -7,46 +7,90 @@ import {
   ClipboardList,
   ExternalLink,
   FileText,
-  Heart,
   Loader2,
-  MapPin,
   Pencil,
+  RefreshCw,
   Send,
   Settings,
   Sparkles,
   Star,
-  Trash2,
-  UserRound,
+  WandSparkles,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { analyzeJobPosting, generateApplicationMessage } from "@/lib/generate-intro.functions";
+import {
+  analyzeJobPosting,
+  generateCoverLetterVersions,
+  reviseCoverLetter,
+} from "@/lib/generate-intro.functions";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "알바 간단 온라인 지원" },
-      { name: "description", content: "알바 공고를 분석해 온라인 지원 메시지를 자동 작성합니다." },
+      { title: "알바몬 맞춤 자기소개서" },
+      {
+        name: "description",
+        content: "알바몬 공고와 실제 지원자 경험으로 자기소개서를 작성합니다.",
+      },
     ],
   }),
   component: App,
 });
 
-type View = "apply" | "history" | "favorites" | "resume" | "settings";
-type Job = {
-  title: string;
+type JobInfo = {
   company: string;
-  location: string;
-  sourceUrl: string;
-  description: string;
-  keywords: string[];
-  warning?: string;
+  role: string;
+  duties: string;
+  qualifications: string;
+  preferred: string;
+  conditions: string;
+  keywords: string;
+  competencies: string;
 };
-type FormData = { name: string; age: string; region: string; message: string };
-type SavedApplication = FormData & { id: string; savedAt: string; job: Job | null; field: string };
-type FavoriteJob = Job & { id: string; savedAt: string };
+type ApplicantInfo = {
+  hasExperience: "있음" | "없음" | "미입력";
+  previousField: string;
+  previousDuties: string;
+  customerService: string;
+  strengths: string;
+  motivation: string;
+  availablePeriod: string;
+  highlightExperience: string;
+  additionalRequest: string;
+};
+type ResultKey = "experience" | "motivation" | "concise";
+type Results = Record<ResultKey, string>;
+type Tone = "친근하게" | "성실하게" | "적극적으로" | "간결하게";
+type Length = 200 | 300 | 500;
+type View = "write" | "history" | "favorites" | "resume" | "settings";
 
-const EMPTY_FORM: FormData = { name: "", age: "", region: "", message: "" };
+const EMPTY_JOB: JobInfo = {
+  company: "",
+  role: "",
+  duties: "",
+  qualifications: "",
+  preferred: "",
+  conditions: "",
+  keywords: "",
+  competencies: "",
+};
+const EMPTY_APPLICANT: ApplicantInfo = {
+  hasExperience: "미입력",
+  previousField: "",
+  previousDuties: "",
+  customerService: "",
+  strengths: "",
+  motivation: "",
+  availablePeriod: "",
+  highlightExperience: "",
+  additionalRequest: "",
+};
+const EMPTY_RESULTS: Results = { experience: "", motivation: "", concise: "" };
+const RESULT_LABELS: Record<ResultKey, string> = {
+  experience: "경험 강조형",
+  motivation: "지원동기 강조형",
+  concise: "간결한 알바몬 제출형",
+};
 const FIELDS = [
   "카페·음료",
   "외식·서비스",
@@ -56,162 +100,135 @@ const FIELDS = [
   "물류·배송",
   "생산·제조",
   "IT·개발",
-  "디자인",
   "기타",
 ];
 
-function readStorage<T>(key: string, fallback: T): T {
-  if (typeof window === "undefined") return fallback;
-  try {
-    return JSON.parse(localStorage.getItem(key) || "") as T;
-  } catch {
-    return fallback;
-  }
-}
-
 function App() {
-  const analyzeOnServer = useServerFn(analyzeJobPosting);
-  const generateMessage = useServerFn(generateApplicationMessage);
-  const [view, setView] = useState<View>("apply");
+  const analyzeServer = useServerFn(analyzeJobPosting);
+  const generateServer = useServerFn(generateCoverLetterVersions);
+  const reviseServer = useServerFn(reviseCoverLetter);
+  const [view, setView] = useState<View>("write");
   const [url, setUrl] = useState("");
-  const [job, setJob] = useState<Job | null>(null);
-  const [field, setField] = useState(FIELDS[0]);
-  const [form, setForm] = useState<FormData>(EMPTY_FORM);
-  const [history, setHistory] = useState<SavedApplication[]>([]);
-  const [favorites, setFavorites] = useState<FavoriteJob[]>([]);
-  const [autoSave, setAutoSave] = useState(true);
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [selectedField, setSelectedField] = useState(FIELDS[0]);
+  const [job, setJob] = useState<JobInfo>(EMPTY_JOB);
+  const [applicant, setApplicant] = useState<ApplicantInfo>(EMPTY_APPLICANT);
+  const [tone, setTone] = useState<Tone>("성실하게");
+  const [length, setLength] = useState<Length>(300);
+  const [results, setResults] = useState<Results>(EMPTY_RESULTS);
+  const [requests, setRequests] = useState<Record<ResultKey, string>>({
+    experience: "",
+    motivation: "",
+    concise: "",
+  });
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [editing, setEditing] = useState<ResultKey | null>(null);
   const [notice, setNotice] = useState("");
+  const [history, setHistory] = useState<
+    { id: string; title: string; text: string; savedAt: string }[]
+  >([]);
 
   useEffect(() => {
-    setForm({ ...EMPTY_FORM, ...readStorage("simple-application-draft", EMPTY_FORM) });
-    setHistory(readStorage("simple-applications", []));
-    setFavorites(readStorage("favorite-jobs", []));
-    setAutoSave(readStorage("application-auto-save", true));
+    try {
+      setHistory(JSON.parse(localStorage.getItem("cover-letter-history") || "[]"));
+    } catch {
+      setHistory([]);
+    }
   }, []);
 
-  useEffect(() => {
-    if (autoSave) localStorage.setItem("simple-application-draft", JSON.stringify(form));
-  }, [form, autoSave]);
-
-  const showNotice = (text: string) => {
-    setNotice(text);
+  const notify = (message: string) => {
+    setNotice(message);
     window.setTimeout(() => setNotice(""), 2800);
   };
-  const update = (key: keyof FormData, value: string) =>
-    setForm((current) => ({ ...current, [key]: value }));
-  const hasProfile = Boolean(form.name.trim() && form.age && form.region.trim());
-  const isComplete = Boolean(job && hasProfile && form.message.trim());
+  const setJobField = (key: keyof JobInfo, value: string) =>
+    setJob((current) => ({ ...current, [key]: value }));
+  const setApplicantField = <K extends keyof ApplicantInfo>(key: K, value: ApplicantInfo[K]) =>
+    setApplicant((current) => ({ ...current, [key]: value }));
 
   const analyze = async () => {
     let parsed: URL;
     try {
       parsed = new URL(url.trim());
     } catch {
-      showNotice("올바른 알바몬 또는 잡코리아 공고 URL을 입력해 주세요.");
+      notify("올바른 알바몬 또는 잡코리아 공고 URL을 입력해 주세요.");
       return;
     }
     setAnalyzing(true);
-    setJob(null);
-    update("message", "");
+    setResults(EMPTY_RESULTS);
     try {
-      const result = await analyzeOnServer({ data: { url: parsed.toString() } });
-      setJob(result);
-      showNotice(result.warning || "공고 분석을 완료했습니다.");
+      const data = await analyzeServer({ data: { url: parsed.toString() } });
+      setSourceUrl(data.sourceUrl);
+      setJob({
+        company: data.company,
+        role: data.role || data.title,
+        duties: data.duties || data.description,
+        qualifications: data.qualifications || "공고에 명시되지 않음",
+        preferred: data.preferred || "공고에 명시되지 않음",
+        conditions: data.conditions || data.location,
+        keywords: Array.isArray(data.keywords)
+          ? data.keywords.join(", ")
+          : String(data.keywords || ""),
+        competencies: data.competencies || "공고에 명시되지 않음",
+      });
+      notify(data.warning || "공고 분석을 완료했습니다. 내용을 확인하고 수정해 주세요.");
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : "공고를 분석하지 못했습니다.");
+      notify(error instanceof Error ? error.message : "공고를 분석하지 못했습니다.");
     } finally {
       setAnalyzing(false);
     }
   };
 
-  const createMessage = async () => {
-    if (!job || !hasProfile) return;
+  const jobPayload = () => ({ ...job, role: `${job.role} (${selectedField})` });
+  const generate = async () => {
+    if (!job.company.trim() || !job.role.trim()) {
+      notify("먼저 공고를 분석하거나 업체명과 모집 직무를 입력해 주세요.");
+      return;
+    }
     setGenerating(true);
     try {
-      const result = await generateMessage({
-        data: {
-          name: form.name,
-          age: Number(form.age),
-          region: form.region,
-          jobTitle: job.title,
-          company: job.company,
-          description: `${job.description}\n지원 분야: ${field}`,
-          keywords: [field, ...job.keywords],
-        },
-      });
-      update("message", result.text);
-      showNotice("공고에 맞춘 지원 메시지를 작성했습니다.");
+      const data = await generateServer({ data: { job: jobPayload(), applicant, tone, length } });
+      setResults(data);
+      notify("3가지 자기소개서를 생성했습니다.");
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : "지원 메시지를 작성하지 못했습니다.");
+      notify(error instanceof Error ? error.message : "자기소개서를 생성하지 못했습니다.");
     } finally {
       setGenerating(false);
     }
   };
 
-  const applicationText = () =>
-    [
-      `지원 공고: ${job?.title || ""}`,
-      `지원 분야: ${field}`,
-      `이름: ${form.name}`,
-      `나이: ${form.age}세`,
-      `사는 지역: ${form.region}`,
-      "",
-      "전달 메시지",
-      form.message,
-    ]
-      .join("\n")
-      .trim();
-  const copyApplication = async () => {
-    if (isComplete) {
-      await navigator.clipboard.writeText(applicationText());
-      showNotice("지원 내용을 복사했습니다.");
+  const revise = async (key: ResultKey, request: string) => {
+    if (!results[key] || !request.trim()) return;
+    setEditing(key);
+    try {
+      const data = await reviseServer({
+        data: { job: jobPayload(), applicant, tone, length, original: results[key], request },
+      });
+      setResults((current) => ({ ...current, [key]: data.text }));
+      setRequests((current) => ({ ...current, [key]: "" }));
+      notify("요청한 부분을 중심으로 수정했습니다.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "수정하지 못했습니다.");
+    } finally {
+      setEditing(null);
     }
   };
-  const saveApplication = () => {
-    if (!isComplete) return;
-    const item: SavedApplication = {
+
+  const save = (key: ResultKey) => {
+    const item = {
       id: crypto.randomUUID(),
+      title: RESULT_LABELS[key],
+      text: results[key],
       savedAt: new Date().toISOString(),
-      job,
-      field,
-      ...form,
     };
     const next = [item, ...history].slice(0, 30);
     setHistory(next);
-    localStorage.setItem("simple-applications", JSON.stringify(next));
-    showNotice("작성 내역에 저장했습니다.");
+    localStorage.setItem("cover-letter-history", JSON.stringify(next));
+    notify("작성 내역에 저장했습니다.");
   };
-  const addFavorite = () => {
-    if (!job) return;
-    if (favorites.some((item) => item.sourceUrl === job.sourceUrl)) {
-      showNotice("이미 즐겨찾기에 있는 공고입니다.");
-      return;
-    }
-    const next = [
-      { ...job, id: crypto.randomUUID(), savedAt: new Date().toISOString() },
-      ...favorites,
-    ];
-    setFavorites(next);
-    localStorage.setItem("favorite-jobs", JSON.stringify(next));
-    showNotice("공고를 즐겨찾기에 저장했습니다.");
-  };
-  const openFavorite = (item: FavoriteJob) => {
-    setJob(item);
-    setUrl(item.sourceUrl);
-    setView("apply");
-    update("message", "");
-  };
-  const deleteHistory = (id: string) => {
-    const next = history.filter((item) => item.id !== id);
-    setHistory(next);
-    localStorage.setItem("simple-applications", JSON.stringify(next));
-  };
-  const deleteFavorite = (id: string) => {
-    const next = favorites.filter((item) => item.id !== id);
-    setFavorites(next);
-    localStorage.setItem("favorite-jobs", JSON.stringify(next));
+  const copy = async (text: string) => {
+    await navigator.clipboard.writeText(text);
+    notify("클립보드에 복사했습니다.");
   };
 
   return (
@@ -225,103 +242,250 @@ function App() {
         </div>
       )}
       <div className="mx-auto flex min-h-screen max-w-[1500px]">
-        <aside className="hidden w-64 shrink-0 flex-col border-r border-slate-200 bg-white p-6 lg:flex">
-          <button onClick={() => setView("apply")} className="flex items-center gap-3 text-left">
-            <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-orange-500 text-white">
-              <Pencil className="h-5 w-5" />
-            </span>
-            <span>
-              <b className="block">알바 지원 도우미</b>
-              <small className="text-slate-500">AI 간단 온라인 지원</small>
-            </span>
-          </button>
-          <nav className="mt-8 space-y-1">
-            <Nav
-              icon={Pencil}
-              label="간단 지원서 작성"
-              active={view === "apply"}
-              onClick={() => setView("apply")}
-            />
-            <Nav
-              icon={FileText}
-              label={`작성 내역 (${history.length})`}
-              active={view === "history"}
-              onClick={() => setView("history")}
-            />
-            <Nav
-              icon={Star}
-              label={`즐겨찾기 공고 (${favorites.length})`}
-              active={view === "favorites"}
-              onClick={() => setView("favorites")}
-            />
-            <Nav
-              icon={ClipboardList}
-              label="이력서 관리"
-              active={view === "resume"}
-              onClick={() => setView("resume")}
-            />
-            <Nav
-              icon={Settings}
-              label="설정"
-              active={view === "settings"}
-              onClick={() => setView("settings")}
-            />
-          </nav>
-          <div className="mt-auto rounded-xl bg-orange-50 p-4 text-xs leading-5 text-orange-800">
-            <Sparkles className="mb-2 h-4 w-4" />
-            공고 URL과 기본 정보만 입력하면 알바몬 온라인 지원창에 넣을 메시지를 작성합니다.
-          </div>
-        </aside>
-
+        <Sidebar view={view} setView={setView} historyCount={history.length} />
         <main className="min-w-0 flex-1 px-4 py-7 sm:px-7 lg:px-10">
           <MobileNav view={view} setView={setView} />
-          {view === "apply" && (
-            <ApplyView
-              {...{
-                url,
-                setUrl,
-                analyze,
-                analyzing,
-                job,
-                field,
-                setField,
-                form,
-                update,
-                createMessage,
-                generating,
-                hasProfile,
-                isComplete,
-                copyApplication,
-                saveApplication,
-                addFavorite,
+          {view === "write" ? (
+            <>
+              <header>
+                <span className="inline-flex items-center gap-2 rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
+                  <Sparkles className="h-3.5 w-3.5" /> 입력한 사실만 사용하는 AI
+                </span>
+                <h1 className="mt-3 text-3xl font-bold">알바몬 맞춤 자기소개서</h1>
+                <p className="mt-2 text-sm text-slate-500">
+                  공고 분석 결과를 확인하고 실제 경험만 입력하면 3가지 버전을 작성합니다.
+                </p>
+              </header>
+              <Card>
+                <Step n={1} title="알바몬 공고 분석" />
+                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && analyze()}
+                    placeholder="알바몬 상세 공고 URL"
+                    className="form-input flex-1"
+                  />
+                  <button
+                    onClick={analyze}
+                    disabled={!url.trim() || analyzing}
+                    className="btn-primary"
+                  >
+                    {analyzing ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <WandSparkles className="h-4 w-4" />
+                    )}
+                    공고 분석하기
+                  </button>
+                </div>
+                {sourceUrl && (
+                  <a
+                    href={sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-3 inline-flex items-center gap-1 text-xs text-orange-600"
+                  >
+                    공고 원문 보기 <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+              </Card>
+              <Card>
+                <Step n={2} title="분석된 공고 정보 확인·수정" />
+                <p className="mt-2 text-xs text-slate-500">
+                  자동 분석이 정확하지 않으면 생성 전에 직접 수정하세요.
+                </p>
+                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <JobField
+                    label="업체명"
+                    value={job.company}
+                    onChange={(v) => setJobField("company", v)}
+                  />
+                  <JobField
+                    label="모집 직무"
+                    value={job.role}
+                    onChange={(v) => setJobField("role", v)}
+                  />
+                  <JobField
+                    label="주요 업무"
+                    value={job.duties}
+                    onChange={(v) => setJobField("duties", v)}
+                    large
+                  />
+                  <JobField
+                    label="지원 자격"
+                    value={job.qualifications}
+                    onChange={(v) => setJobField("qualifications", v)}
+                    large
+                  />
+                  <JobField
+                    label="우대사항"
+                    value={job.preferred}
+                    onChange={(v) => setJobField("preferred", v)}
+                    large
+                  />
+                  <JobField
+                    label="근무 조건"
+                    value={job.conditions}
+                    onChange={(v) => setJobField("conditions", v)}
+                    large
+                  />
+                  <JobField
+                    label="공고 핵심 키워드"
+                    value={job.keywords}
+                    onChange={(v) => setJobField("keywords", v)}
+                  />
+                  <JobField
+                    label="필요 역량"
+                    value={job.competencies}
+                    onChange={(v) => setJobField("competencies", v)}
+                    large
+                  />
+                </div>
+                <div className="mt-5">
+                  <b className="text-sm">분야 선택</b>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {FIELDS.map((field) => (
+                      <button
+                        key={field}
+                        onClick={() => setSelectedField(field)}
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-xs",
+                          selectedField === field
+                            ? "border-orange-400 bg-orange-50 text-orange-600"
+                            : "border-slate-200",
+                        )}
+                      >
+                        {field}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </Card>
+              <Card>
+                <Step n={3} title="지원자 정보" />
+                <p className="mt-2 text-xs text-amber-700">
+                  입력하지 않은 경험은 자기소개서에 사용하지 않습니다.
+                </p>
+                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <SelectField
+                    label="아르바이트 경험 유무"
+                    value={applicant.hasExperience}
+                    onChange={(v) =>
+                      setApplicantField("hasExperience", v as ApplicantInfo["hasExperience"])
+                    }
+                    options={["미입력", "있음", "없음"]}
+                  />
+                  <TextField
+                    label="이전 근무 분야"
+                    value={applicant.previousField}
+                    onChange={(v) => setApplicantField("previousField", v)}
+                  />
+                  <TextField
+                    label="담당했던 업무"
+                    value={applicant.previousDuties}
+                    onChange={(v) => setApplicantField("previousDuties", v)}
+                    large
+                  />
+                  <TextField
+                    label="고객 응대 경험"
+                    value={applicant.customerService}
+                    onChange={(v) => setApplicantField("customerService", v)}
+                    large
+                  />
+                  <TextField
+                    label="본인의 장점"
+                    value={applicant.strengths}
+                    onChange={(v) => setApplicantField("strengths", v)}
+                    large
+                  />
+                  <TextField
+                    label="지원동기"
+                    value={applicant.motivation}
+                    onChange={(v) => setApplicantField("motivation", v)}
+                    large
+                  />
+                  <TextField
+                    label="근무 가능 기간"
+                    value={applicant.availablePeriod}
+                    onChange={(v) => setApplicantField("availablePeriod", v)}
+                  />
+                  <TextField
+                    label="강조하고 싶은 경험"
+                    value={applicant.highlightExperience}
+                    onChange={(v) => setApplicantField("highlightExperience", v)}
+                    large
+                  />
+                  <div className="md:col-span-2">
+                    <TextField
+                      label="추가 요청 사항"
+                      value={applicant.additionalRequest}
+                      onChange={(v) => setApplicantField("additionalRequest", v)}
+                      large
+                    />
+                  </div>
+                </div>
+                <div className="mt-6 grid gap-5 border-t pt-6 md:grid-cols-2">
+                  <ChoiceGroup
+                    label="문체"
+                    values={["친근하게", "성실하게", "적극적으로", "간결하게"]}
+                    selected={tone}
+                    onSelect={(v) => setTone(v as Tone)}
+                  />
+                  <ChoiceGroup
+                    label="글자 수"
+                    values={["200자", "300자", "500자"]}
+                    selected={`${length}자`}
+                    onSelect={(v) => setLength(Number(v.replace("자", "")) as Length)}
+                  />
+                </div>
+                <button
+                  onClick={generate}
+                  disabled={generating}
+                  className="btn-primary mt-6 w-full py-3.5"
+                >
+                  {generating ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-4 w-4" />
+                  )}
+                  3가지 자기소개서 생성
+                </button>
+              </Card>
+              {(Object.keys(RESULT_LABELS) as ResultKey[]).some((key) => results[key]) && (
+                <section className="mt-6 space-y-5">
+                  <h2 className="text-xl font-bold">생성 결과</h2>
+                  {(Object.keys(RESULT_LABELS) as ResultKey[]).map(
+                    (key) =>
+                      results[key] && (
+                        <ResultCard
+                          key={key}
+                          resultKey={key}
+                          title={RESULT_LABELS[key]}
+                          text={results[key]}
+                          request={requests[key]}
+                          setRequest={(v) => setRequests((current) => ({ ...current, [key]: v }))}
+                          loading={editing === key}
+                          copy={() => copy(results[key])}
+                          save={() => save(key)}
+                          revise={(request) => revise(key, request)}
+                        />
+                      ),
+                  )}
+                </section>
+              )}
+            </>
+          ) : view === "history" ? (
+            <History
+              items={history}
+              onDelete={(id) => {
+                const next = history.filter((item) => item.id !== id);
+                setHistory(next);
+                localStorage.setItem("cover-letter-history", JSON.stringify(next));
               }}
             />
-          )}
-          {view === "history" && (
-            <ListView
-              title="작성 내역"
-              empty="저장된 지원서가 없습니다."
-              items={history.map((item) => ({
-                id: item.id,
-                title: item.job?.title || "간단 지원서",
-                subtitle: `${item.name} · ${item.field} · ${new Date(item.savedAt).toLocaleString("ko-KR")}`,
-                body: item.message,
-              }))}
-              onDelete={deleteHistory}
-            />
-          )}
-          {view === "favorites" && (
-            <FavoriteView items={favorites} onOpen={openFavorite} onDelete={deleteFavorite} />
-          )}
-          {view === "resume" && <ProfileView form={form} update={update} showNotice={showNotice} />}
-          {view === "settings" && (
-            <SettingsView
-              autoSave={autoSave}
-              setAutoSave={(value) => {
-                setAutoSave(value);
-                localStorage.setItem("application-auto-save", JSON.stringify(value));
-              }}
-            />
+          ) : (
+            <Placeholder view={view} />
           )}
         </main>
       </div>
@@ -329,459 +493,222 @@ function App() {
   );
 }
 
-type ApplyViewProps = {
-  url: string;
-  setUrl: (value: string) => void;
-  analyze: () => Promise<void>;
-  analyzing: boolean;
-  job: Job | null;
-  field: string;
-  setField: (value: string) => void;
-  form: FormData;
-  update: (key: keyof FormData, value: string) => void;
-  createMessage: () => Promise<void>;
-  generating: boolean;
-  hasProfile: boolean;
-  isComplete: boolean;
-  copyApplication: () => Promise<void>;
-  saveApplication: () => void;
-  addFavorite: () => void;
-};
-
-function ApplyView({
-  url,
-  setUrl,
-  analyze,
-  analyzing,
-  job,
-  field,
-  setField,
-  form,
-  update,
-  createMessage,
-  generating,
-  hasProfile,
-  isComplete,
-  copyApplication,
-  saveApplication,
-  addFavorite,
-}: ApplyViewProps) {
+function ResultCard({
+  title,
+  text,
+  request,
+  setRequest,
+  loading,
+  copy,
+  save,
+  revise,
+}: {
+  resultKey: ResultKey;
+  title: string;
+  text: string;
+  request: string;
+  setRequest: (v: string) => void;
+  loading: boolean;
+  copy: () => void;
+  save: () => void;
+  revise: (request: string) => void;
+}) {
+  const actions = [
+    { label: "다시 생성", request: "같은 방향과 사실을 유지하되 표현을 새롭게 다듬어 주세요." },
+    { label: "더 짧게", request: "핵심 사실은 유지하고 전체 글을 더 짧게 줄여 주세요." },
+    {
+      label: "더 자연스럽게",
+      request: "내용은 유지하고 실제 알바 지원자가 쓴 것처럼 더 자연스럽게 다듬어 주세요.",
+    },
+    {
+      label: "경험 강조",
+      request: "입력된 실제 경험만 사용하여 경험 부분을 조금 더 강조해 주세요.",
+    },
+    {
+      label: "지원동기 강화",
+      request: "입력된 지원동기와 공고 정보만 사용하여 지원 이유를 강화해 주세요.",
+    },
+  ];
   return (
-    <>
-      <header>
-        <span className="inline-flex items-center gap-2 rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
-          <Send className="h-3.5 w-3.5" /> 알바몬 맞춤 간단 지원
-        </span>
-        <h1 className="mt-3 text-3xl font-bold">공고에 맞는 지원 메시지를 자동으로</h1>
-        <p className="mt-2 text-sm text-slate-500">
-          URL 분석 후 기본 정보만 입력하면 온라인 지원용 전달 메시지를 작성합니다.
-        </p>
-      </header>
-      <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_330px]">
-        <div className="space-y-5">
-          <Card>
-            <Step n={1} title="공고 URL 분석" />
-            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-              <input
-                type="url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && url.trim() && analyze()}
-                placeholder="알바몬 또는 잡코리아 상세 공고 URL"
-                className="form-input min-w-0 flex-1"
-              />
-              <button
-                onClick={analyze}
-                disabled={!url.trim() || analyzing}
-                className="btn-primary whitespace-nowrap"
-              >
-                {analyzing ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Check className="h-4 w-4" />
-                )}
-                공고 분석
-              </button>
-            </div>
-          </Card>
-          <Card>
-            <Step n={2} title="지원 분야 선택" />
-            <div className="mt-4 flex flex-wrap gap-2">
-              {FIELDS.map((item) => (
-                <button
-                  key={item}
-                  onClick={() => setField(item)}
-                  className={cn(
-                    "rounded-lg border px-3 py-2 text-xs font-medium transition",
-                    field === item
-                      ? "border-orange-400 bg-orange-50 text-orange-600"
-                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300",
-                  )}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-          </Card>
-          <Card>
-            <Step n={3} title="간단 지원서" />
-            <div className="mt-5 grid gap-5 sm:grid-cols-2">
-              <Field label="이름" required>
-                <input
-                  value={form.name}
-                  onChange={(e) => update("name", e.target.value)}
-                  maxLength={30}
-                  placeholder="이름"
-                  className="form-input"
-                />
-              </Field>
-              <Field label="나이" required>
-                <input
-                  type="number"
-                  min="15"
-                  max="100"
-                  value={form.age}
-                  onChange={(e) => update("age", e.target.value)}
-                  placeholder="나이"
-                  className="form-input"
-                />
-              </Field>
-              <div className="sm:col-span-2">
-                <Field label="사는 지역" required>
-                  <div className="relative">
-                    <MapPin className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    <input
-                      value={form.region}
-                      onChange={(e) => update("region", e.target.value)}
-                      maxLength={50}
-                      placeholder="예: 서울시 강남구"
-                      className="form-input pl-11"
-                    />
-                  </div>
-                </Field>
-              </div>
-            </div>
-            <div className="mt-7 border-t pt-6">
-              <div className="flex flex-wrap items-end justify-between gap-3">
-                <div>
-                  <b className="text-sm">온라인 지원 전달 메시지</b>
-                  <p className="mt-1 text-xs text-slate-500">
-                    생성된 내용을 확인하고 필요하면 수정하세요.
-                  </p>
-                </div>
-                <button
-                  onClick={createMessage}
-                  disabled={!job || !hasProfile || generating}
-                  className="btn-primary"
-                >
-                  {generating ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Sparkles className="h-4 w-4" />
-                  )}
-                  {form.message ? "다시 작성" : "AI 자동 작성"}
-                </button>
-              </div>
-              <div className="relative mt-3">
-                <textarea
-                  value={form.message}
-                  onChange={(e) => update("message", e.target.value.slice(0, 1000))}
-                  maxLength={1000}
-                  rows={7}
-                  placeholder="공고 분석과 기본 정보 입력 후 AI 자동 작성을 눌러 주세요."
-                  className="w-full resize-y rounded-xl border border-slate-800 px-5 py-4 pb-9 text-sm leading-6 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
-                />
-                <span className="absolute bottom-3 right-4 text-xs">
-                  <b className="text-orange-500">{form.message.length}</b>
-                  <span className="text-slate-400">/1000</span>
-                </span>
-              </div>
-            </div>
-            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <button onClick={saveApplication} disabled={!isComplete} className="btn-secondary">
-                <Bookmark className="h-4 w-4" />
-                작성 내역 저장
-              </button>
-              <button onClick={copyApplication} disabled={!isComplete} className="btn-primary">
-                <Clipboard className="h-4 w-4" />
-                지원 내용 복사
-              </button>
-            </div>
-          </Card>
+    <article className="rounded-2xl border bg-white p-5 shadow-sm sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="font-bold text-orange-600">{title}</h3>
+        <div className="flex gap-2">
+          <button onClick={copy} className="btn-secondary text-xs">
+            <Clipboard className="h-3.5 w-3.5" />
+            복사하기
+          </button>
+          <button onClick={save} className="btn-secondary text-xs">
+            <Bookmark className="h-3.5 w-3.5" />
+            저장하기
+          </button>
         </div>
-        <JobPanel job={job} onFavorite={addFavorite} />
       </div>
-    </>
+      <p className="mt-4 whitespace-pre-wrap rounded-xl bg-slate-50 p-5 text-sm leading-7 text-slate-700">
+        {text}
+      </p>
+      <div className="mt-4 flex flex-wrap gap-2">
+        {actions.map((action) => (
+          <button
+            key={action.label}
+            onClick={() => revise(action.request)}
+            disabled={loading}
+            className="btn-secondary text-xs"
+          >
+            {action.label === "다시 생성" && <RefreshCw className="h-3.5 w-3.5" />}
+            {action.label}
+          </button>
+        ))}
+      </div>
+      <div className="mt-5 border-t pt-5">
+        <label className="text-sm font-semibold">AI에게 수정 요청</label>
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+          <input
+            value={request}
+            onChange={(e) => setRequest(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && request.trim() && revise(request)}
+            placeholder="예: 첫 문장을 더 친근하게 바꿔줘"
+            className="form-input flex-1"
+          />
+          <button
+            onClick={() => revise(request)}
+            disabled={!request.trim() || loading}
+            className="btn-primary"
+          >
+            {loading && <Loader2 className="h-4 w-4 animate-spin" />}요청 반영
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-slate-400">
+          기존 글 전체를 새로 쓰지 않고 요청한 부분을 중심으로 수정합니다.
+        </p>
+      </div>
+    </article>
   );
 }
 
-function JobPanel({ job, onFavorite }: { job: Job | null; onFavorite: () => void }) {
+function Sidebar({
+  view,
+  setView,
+  historyCount,
+}: {
+  view: View;
+  setView: (v: View) => void;
+  historyCount: number;
+}) {
+  const nav: { id: View; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+    { id: "write", label: "자기소개서 작성", icon: Pencil },
+    { id: "history", label: `작성 내역 (${historyCount})`, icon: FileText },
+    { id: "favorites", label: "즐겨찾기 공고", icon: Star },
+    { id: "resume", label: "이력서 관리", icon: ClipboardList },
+    { id: "settings", label: "설정", icon: Settings },
+  ];
   return (
-    <aside className="h-fit rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h2 className="font-bold">분석 공고 정보</h2>
-      {job ? (
-        <div className="mt-5 space-y-4 text-sm">
-          <Info label="공고명" value={job.title} />
-          <Info label="업체" value={job.company} />
-          <Info label="근무 지역" value={job.location} />
-          <div>
-            <span className="text-xs text-slate-500">핵심 키워드</span>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {job.keywords.map((word) => (
-                <span
-                  key={word}
-                  className="rounded-md bg-orange-50 px-2 py-1 text-xs text-orange-600"
-                >
-                  {word}
-                </span>
-              ))}
-            </div>
-          </div>
-          {job.warning && (
-            <p className="rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-700">
-              {job.warning}
-            </p>
-          )}
-          <div className="flex gap-2">
-            <button onClick={onFavorite} className="btn-secondary flex-1">
-              <Heart className="h-4 w-4" />
-              즐겨찾기
-            </button>
-            <a
-              href={job.sourceUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="btn-secondary flex-1"
-            >
-              원문 <ExternalLink className="h-4 w-4" />
-            </a>
-          </div>
-        </div>
-      ) : (
-        <p className="mt-5 text-sm leading-6 text-slate-400">
-          공고 URL을 분석하면 공고명, 업체, 지역과 핵심 키워드가 표시됩니다.
-        </p>
-      )}
+    <aside className="hidden w-64 shrink-0 border-r bg-white p-6 lg:block">
+      <button onClick={() => setView("write")} className="flex items-center gap-3">
+        <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-orange-500 text-white">
+          <Pencil className="h-5 w-5" />
+        </span>
+        <span className="text-left">
+          <b className="block">알바 지원 도우미</b>
+          <small className="text-slate-500">사실 기반 AI 작성</small>
+        </span>
+      </button>
+      <nav className="mt-8 space-y-1">
+        {nav.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm",
+              view === id ? "bg-orange-50 text-orange-600" : "text-slate-600 hover:bg-slate-50",
+            )}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </button>
+        ))}
+      </nav>
     </aside>
   );
 }
-function ListView({
-  title,
-  empty,
-  items,
-  onDelete,
-}: {
-  title: string;
-  empty: string;
-  items: { id: string; title: string; subtitle: string; body: string }[];
-  onDelete: (id: string) => void;
-}) {
+function MobileNav({ view, setView }: { view: View; setView: (v: View) => void }) {
   return (
-    <section>
-      <h1 className="text-2xl font-bold">{title}</h1>
-      <div className="mt-6 space-y-3">
-        {items.length ? (
-          items.map((item) => (
-            <article key={item.id} className="rounded-xl border bg-white p-5">
-              <div className="flex justify-between gap-4">
-                <div>
-                  <b>{item.title}</b>
-                  <p className="mt-1 text-xs text-slate-500">{item.subtitle}</p>
-                </div>
-                <button
-                  onClick={() => onDelete(item.id)}
-                  className="text-slate-400 hover:text-red-500"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-              <p className="mt-4 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-slate-600">
-                {item.body}
-              </p>
-            </article>
-          ))
-        ) : (
-          <Empty text={empty} />
-        )}
-      </div>
-    </section>
-  );
-}
-function FavoriteView({
-  items,
-  onOpen,
-  onDelete,
-}: {
-  items: FavoriteJob[];
-  onOpen: (item: FavoriteJob) => void;
-  onDelete: (id: string) => void;
-}) {
-  return (
-    <section>
-      <h1 className="text-2xl font-bold">즐겨찾기 공고</h1>
-      <div className="mt-6 space-y-3">
-        {items.length ? (
-          items.map((item) => (
-            <article
-              key={item.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-white p-5"
-            >
-              <div>
-                <b>{item.title}</b>
-                <p className="mt-1 text-xs text-slate-500">{item.company}</p>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={() => onOpen(item)} className="btn-secondary">
-                  지원서 작성
-                </button>
-                <button onClick={() => onDelete(item.id)} className="btn-secondary text-red-500">
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            </article>
-          ))
-        ) : (
-          <Empty text="즐겨찾기한 공고가 없습니다." />
-        )}
-      </div>
-    </section>
-  );
-}
-function ProfileView({
-  form,
-  update,
-  showNotice,
-}: {
-  form: FormData;
-  update: (key: keyof FormData, value: string) => void;
-  showNotice: (text: string) => void;
-}) {
-  return (
-    <section className="max-w-2xl">
-      <h1 className="text-2xl font-bold">이력서 관리</h1>
-      <p className="mt-2 text-sm text-slate-500">
-        간단 지원에 반복 사용하는 기본 정보를 관리합니다.
-      </p>
-      <Card>
-        <div className="grid gap-5 sm:grid-cols-2">
-          <Field label="이름">
-            <input
-              className="form-input"
-              value={form.name}
-              onChange={(e) => update("name", e.target.value)}
-            />
-          </Field>
-          <Field label="나이">
-            <input
-              className="form-input"
-              type="number"
-              value={form.age}
-              onChange={(e) => update("age", e.target.value)}
-            />
-          </Field>
-          <div className="sm:col-span-2">
-            <Field label="사는 지역">
-              <input
-                className="form-input"
-                value={form.region}
-                onChange={(e) => update("region", e.target.value)}
-              />
-            </Field>
-          </div>
-        </div>
+    <div className="mb-6 flex gap-2 overflow-x-auto lg:hidden">
+      {(["write", "history", "favorites", "resume", "settings"] as View[]).map((id) => (
         <button
-          onClick={() => showNotice("기본 정보가 저장되었습니다.")}
-          className="btn-primary mt-5"
-        >
-          기본 정보 저장
-        </button>
-      </Card>
-    </section>
-  );
-}
-function SettingsView({
-  autoSave,
-  setAutoSave,
-}: {
-  autoSave: boolean;
-  setAutoSave: (value: boolean) => void;
-}) {
-  return (
-    <section className="max-w-2xl">
-      <h1 className="text-2xl font-bold">설정</h1>
-      <div className="mt-6 flex items-center justify-between rounded-xl border bg-white p-5">
-        <div>
-          <b className="text-sm">입력 내용 자동 저장</b>
-          <p className="mt-1 text-xs text-slate-500">
-            현재 브라우저에 이름, 나이, 지역과 메시지를 임시 저장합니다.
-          </p>
-        </div>
-        <button
-          onClick={() => setAutoSave(!autoSave)}
-          className={cn(
-            "relative h-7 w-12 rounded-full transition",
-            autoSave ? "bg-orange-500" : "bg-slate-300",
-          )}
-        >
-          <span
-            className={cn(
-              "absolute top-1 h-5 w-5 rounded-full bg-white transition",
-              autoSave ? "left-6" : "left-1",
-            )}
-          />
-        </button>
-      </div>
-    </section>
-  );
-}
-function MobileNav({ view, setView }: { view: View; setView: (view: View) => void }) {
-  return (
-    <div className="mb-6 flex gap-2 overflow-x-auto pb-2 lg:hidden">
-      {(["apply", "history", "favorites", "resume", "settings"] as View[]).map((item) => (
-        <button
-          key={item}
-          onClick={() => setView(item)}
+          key={id}
+          onClick={() => setView(id)}
           className={cn(
             "whitespace-nowrap rounded-lg px-3 py-2 text-xs",
-            view === item ? "bg-orange-500 text-white" : "border bg-white",
+            view === id ? "bg-orange-500 text-white" : "border bg-white",
           )}
         >
           {
             {
-              apply: "지원서 작성",
-              history: "작성 내역",
+              write: "작성",
+              history: "내역",
               favorites: "즐겨찾기",
               resume: "이력서",
               settings: "설정",
-            }[item]
+            }[id]
           }
         </button>
       ))}
     </div>
   );
 }
-function Nav({
-  icon: Icon,
-  label,
-  active,
-  onClick,
+function History({
+  items,
+  onDelete,
 }: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  active: boolean;
-  onClick: () => void;
+  items: { id: string; title: string; text: string; savedAt: string }[];
+  onDelete: (id: string) => void;
 }) {
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm",
-        active ? "bg-orange-50 text-orange-600" : "text-slate-600 hover:bg-slate-50",
-      )}
-    >
-      <Icon className="h-4 w-4" />
-      {label}
-    </button>
+    <section>
+      <h1 className="text-2xl font-bold">작성 내역</h1>
+      <div className="mt-6 space-y-3">
+        {items.length ? (
+          items.map((item) => (
+            <article key={item.id} className="rounded-xl border bg-white p-5">
+              <div className="flex justify-between">
+                <b>{item.title}</b>
+                <button onClick={() => onDelete(item.id)} className="text-xs text-red-500">
+                  삭제
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-slate-400">
+                {new Date(item.savedAt).toLocaleString("ko-KR")}
+              </p>
+              <p className="mt-4 whitespace-pre-wrap text-sm leading-6 text-slate-600">
+                {item.text}
+              </p>
+            </article>
+          ))
+        ) : (
+          <div className="rounded-xl border border-dashed bg-white p-12 text-center text-slate-400">
+            저장된 자기소개서가 없습니다.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+function Placeholder({ view }: { view: View }) {
+  const names = {
+    favorites: "즐겨찾기 공고",
+    resume: "이력서 관리",
+    settings: "설정",
+    write: "",
+    history: "",
+  };
+  return (
+    <section>
+      <h1 className="text-2xl font-bold">{names[view]}</h1>
+      <div className="mt-6 rounded-xl border border-dashed bg-white p-12 text-center text-sm text-slate-400">
+        이 메뉴는 다음 단계에서 지원 데이터와 연결할 수 있습니다.
+      </div>
+    </section>
   );
 }
 function Card({ children }: { children: React.ReactNode }) {
@@ -801,37 +728,120 @@ function Step({ n, title }: { n: number; title: string }) {
     </div>
   );
 }
-function Field({
+function JobField({
   label,
-  required,
-  children,
+  value,
+  onChange,
+  large,
 }: {
   label: string;
-  required?: boolean;
-  children: React.ReactNode;
+  value: string;
+  onChange: (v: string) => void;
+  large?: boolean;
 }) {
   return (
-    <label className="block">
-      <span className="mb-2 block text-sm font-semibold">
-        {label}
-        {required && <span className="ml-1 text-orange-500">*</span>}
-      </span>
-      {children}
+    <label>
+      <span className="mb-2 block text-sm font-semibold">{label}</span>
+      {large ? (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={4}
+          className="form-input resize-y"
+        />
+      ) : (
+        <input value={value} onChange={(e) => onChange(e.target.value)} className="form-input" />
+      )}
     </label>
   );
 }
-function Info({ label, value }: { label: string; value: string }) {
+function TextField({
+  label,
+  value,
+  onChange,
+  large,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  large?: boolean;
+}) {
   return (
-    <div>
-      <span className="text-xs text-slate-500">{label}</span>
-      <p className="mt-1 leading-6">{value || "공고 원문에서 확인"}</p>
-    </div>
+    <label>
+      <span className="mb-2 block text-sm font-semibold">
+        {label} <small className="font-normal text-slate-400">(선택)</small>
+      </span>
+      {large ? (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={3}
+          placeholder="입력한 내용만 자기소개서에 사용됩니다."
+          className="form-input resize-y"
+        />
+      ) : (
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="해당하는 경우 입력해 주세요."
+          className="form-input"
+        />
+      )}
+    </label>
   );
 }
-function Empty({ text }: { text: string }) {
+function SelectField({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+}) {
   return (
-    <div className="rounded-xl border border-dashed bg-white p-12 text-center text-sm text-slate-400">
-      {text}
+    <label>
+      <span className="mb-2 block text-sm font-semibold">{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="form-input">
+        {options.map((option) => (
+          <option key={option}>{option}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+function ChoiceGroup({
+  label,
+  values,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  values: string[];
+  selected: string;
+  onSelect: (v: string) => void;
+}) {
+  return (
+    <div>
+      <b className="text-sm">{label}</b>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {values.map((value) => (
+          <button
+            key={value}
+            onClick={() => onSelect(value)}
+            className={cn(
+              "rounded-lg border px-3 py-2 text-xs",
+              selected === value
+                ? "border-orange-400 bg-orange-50 text-orange-600"
+                : "border-slate-200",
+            )}
+          >
+            {value}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
