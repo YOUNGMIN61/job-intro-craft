@@ -57,6 +57,7 @@ type Job = {
   description: string;
   keywords: string[];
   sourceUrl: string;
+  warning?: string;
 };
 type SavedItem = { id: string; createdAt: string; job: Job; field: string; result: string };
 
@@ -108,7 +109,7 @@ function Index() {
     try {
       const data = await analyzeOnServer({ data: { url: parsed.toString() } });
       setJob(data);
-      showNotice("공고 정보를 불러왔습니다.");
+      showNotice(data.warning || "공고 정보를 불러왔습니다.");
     } catch (e) {
       showNotice(e instanceof Error ? e.message : "공고를 분석하지 못했습니다.");
     } finally {
@@ -393,6 +394,11 @@ function Index() {
                   <h2 className="font-bold">분석된 공고 정보</h2>
                   {job ? (
                     <div className="mt-5 space-y-4 text-sm">
+                      {job.warning && (
+                        <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                          {job.warning} 원문 링크는 정상적으로 이용할 수 있습니다.
+                        </div>
+                      )}
                       <Info label="공고명" value={job.title} />
                       <Info label="회사" value={job.company} />
                       <Info label="근무 지역" value={job.location || "공고에서 확인"} />

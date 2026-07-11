@@ -13,13 +13,12 @@ const GenerateInput = z.object({
   sections: z.array(z.enum(["growth", "strengths", "motivation", "aspiration"])).min(1),
 });
 
-const ALLOWED_HOSTS = [
-  "albamon.com",
-  "www.albamon.com",
-  "m.albamon.com",
-  "jobkorea.co.kr",
-  "www.jobkorea.co.kr",
-];
+const ALLOWED_DOMAINS = ["albamon.com", "jobkorea.co.kr"];
+
+function isAllowedHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return ALLOWED_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
 
 function decodeHtml(value: string) {
   return value
@@ -59,32 +58,101 @@ function cleanText(value: string) {
   ).slice(0, 6000);
 }
 
+function jsonLdValues(html: string) {
+  const values: Record<string, unknown>[] = [];
+  const scripts = html.matchAll(
+    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
+  );
+  for (const match of scripts) {
+    try {
+      const parsed = JSON.parse(decodeHtml(match[1]));
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of items) if (item && typeof item === "object") values.push(item);
+    } catch {
+      // Some sites emit malformed JSON-LD. Other extraction strategies still apply.
+    }
+  }
+  return values;
+}
+
+function firstString(values: unknown[]) {
+  return (
+    values.find((value): value is string => typeof value === "string" && value.trim() !== "") || ""
+  );
+}
+
+function fallbackJob(target: URL, reason: string) {
+  const isAlbamon = target.hostname.toLowerCase().includes("albamon");
+  const site = isAlbamon ? "알바몬" : "잡코리아";
+  const id =
+    target.pathname.match(/(?:detail\/|GI_Read\/)(\d+)/i)?.[1] ||
+    target.searchParams.get("jobId") ||
+    "";
+  return {
+    title: id ? `${site} 채용 공고 #${id}` : `${site} 채용 공고`,
+    company: `${site} 등록 업체`,
+    location: "공고 원문에서 확인",
+    description:
+      "공고 사이트의 자동 접근 제한으로 상세 내용을 가져오지 못했습니다. 원문을 확인한 뒤 지원 분야와 작성 항목을 선택해 주세요.",
+    keywords: [site, "채용", "지원"],
+    sourceUrl: target.toString(),
+    warning: reason,
+  };
+}
+
 export const analyzeJobPosting = createServerFn({ method: "POST" })
   .validator((input: unknown) => AnalyzeInput.parse(input))
   .handler(async ({ data }) => {
     const target = new URL(data.url);
-    if (target.protocol !== "https:" || !ALLOWED_HOSTS.includes(target.hostname.toLowerCase()))
+    if (target.protocol !== "https:" || !isAllowedHost(target.hostname))
       throw new Error("현재는 알바몬과 잡코리아의 HTTPS 공고 URL을 지원합니다.");
-    const response = await fetch(target, {
-      redirect: "follow",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; JobIntroCraft/1.0)",
-        Accept: "text/html,application/xhtml+xml",
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!response.ok) throw new Error(`공고 페이지를 불러오지 못했습니다. (${response.status})`);
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        redirect: "follow",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+          "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch {
+      return fallbackJob(target, "공고 사이트 연결이 지연되어 기본 정보로 계속합니다.");
+    }
+    if (!response.ok)
+      return fallbackJob(target, `공고 사이트가 자동 분석을 제한했습니다. (${response.status})`);
+    if (!isAllowedHost(new URL(response.url).hostname))
+      throw new Error("공고 URL이 지원하지 않는 사이트로 이동되었습니다.");
     const html = await response.text();
-    const title =
-      meta(html, "og:title") ||
-      cleanText(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "");
-    const description =
-      meta(html, "og:description") || meta(html, "description") || cleanText(html).slice(0, 2500);
-    if (!title)
-      throw new Error("공고 제목을 찾지 못했습니다. 공개된 상세 공고 URL인지 확인해 주세요.");
-    const company =
-      meta(html, "og:site_name") ||
-      (target.hostname.includes("albamon") ? "알바몬 공고" : "잡코리아 공고");
+    const structured = jsonLdValues(html);
+    const title = firstString([
+      ...structured.map((item) => item.title),
+      ...structured.map((item) => item.name),
+      meta(html, "og:title"),
+      meta(html, "twitter:title"),
+      cleanText(html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || ""),
+      cleanText(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || ""),
+    ]).replace(/\s*[|｜-]\s*(알바몬|잡코리아).*$/i, "");
+    const description = firstString([
+      ...structured.map((item) => item.description),
+      meta(html, "og:description"),
+      meta(html, "twitter:description"),
+      meta(html, "description"),
+      cleanText(html).slice(0, 2500),
+    ]);
+    if (!title) return fallbackJob(target, "공고 상세 내용을 읽을 수 없어 기본 정보로 계속합니다.");
+    const hiringOrganization = structured.find(
+      (item) => item.hiringOrganization,
+    )?.hiringOrganization;
+    const company = firstString([
+      typeof hiringOrganization === "object" && hiringOrganization
+        ? (hiringOrganization as Record<string, unknown>).name
+        : "",
+      meta(html, "og:site_name"),
+      target.hostname.includes("albamon") ? "알바몬 등록 업체" : "잡코리아 등록 업체",
+    ]);
     const words = `${title} ${description}`.match(/[가-힣A-Za-z0-9+#]{2,}/g) || [];
     const stop = new Set([
       "채용",
@@ -105,6 +173,7 @@ export const analyzeJobPosting = createServerFn({ method: "POST" })
       description,
       keywords,
       sourceUrl: target.toString(),
+      warning: "",
     };
   });
 
